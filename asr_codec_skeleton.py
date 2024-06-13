@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+#this is streaming modeule
 class StreamProcessor(nn.Module):
     def __init__(self, wenet_model_path, audiodec_model_path):
         super(StreamProcessor, self).__init__()
