@@ -11,13 +11,18 @@ AudioDec: https://github.com/facebookresearch/AudioDec for real-time codec  and 
 
 
 Next steps: 
-1.  Setup WeNet streaming ASR conformer CTC + transformer with caching for attention + CNN https://wenet.org.cn/wenet/runtime.html
-    The best streaming architectures use conformer with caching as the best technique including seamless, we want the smallest fastest implementation of conformer CTC to predict semantic units for StreamVoice  (Target by end of Tuesday) need a working system to give conformer audio outputs with word boundary 
-2. Create the cross-embedding input for LLama like causal decoder with audiodec+ wenet output alternation (By end of Wednesday)   
-4. Understand the dataset that we plan to use (probably use that Audiodec was trained)
-5. Train/infer ASR on it
-6. Start coding components phase by phase and look at the generated samples
-
+1.  Get the Conformer encoder / Audio dec token embeddings, alternatively to create cross embeddings 
+2.  create a 4 LLama causal model
+3.  create a sub decoder to take the output of 4 layers causal model , at a timestamp and predict the 4 Audiodec tokens
+4.  pass the predicted Audiodec tokens to the Audiodec decoder and generate audio
+5.  setup the training pipeline for the llama decoder and sub-decoder
+6.  debug / eval iterate
+7.  replace the ASR encoder with chunk chunk-wise conformer
+8.  repeat training
+9.  add future prediction training guided by teacher, semantic token masking
+10.  optimize and check RTF on CPU
+11.  Optimize for windows runtime
+12.  CyborgVoice ready! 
 
 
 
