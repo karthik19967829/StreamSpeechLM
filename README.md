@@ -21,4 +21,11 @@ Next steps:
 
 
 
+setup 
+
+```
+bash Miniconda3-latest-Linux-x86_64.s
+conda create -n cyborg-env python=3.11
+pip install -r requirements.txt
+```
 
