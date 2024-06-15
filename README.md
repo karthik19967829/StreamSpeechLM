@@ -34,3 +34,13 @@ conda create -n cyborg-env python=3.11
 pip install -r requirements.txt
 ```
 
+## Progress tracker 
+
+Jun 14th 
+1. Added audio tokenizer function from vall-e Audiodec
+2. Updated Cyborg Encoder
+
+Next steps:
+1. Embed audio tokens 8 to Embeddings concatenated and projected to a single dimension (de-risked)
+2. Project both ASR embedding and audio token embedding to same dimension (de-risked)
+3. Length regulation / combining both Embed tokens and ASR embedings to create cross embedding correctly is the key (try to find reference for length regulation / cross embedding)
