@@ -30,7 +30,7 @@ setup
 
 ```
 wget https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh
-chmod +x Miniconda-latest-Linux-x86_64.sh
+chmod +x Miniconda3-latest-Linux-x86_64.sh
 ./Miniconda-latest-Linux-x86_64.sh
 conda create -n cyborg-env python=3.11
 pip install -r requirements.txt
