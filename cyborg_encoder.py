@@ -8,9 +8,11 @@ from tqdm import tqdm
 import time
 import torchaudio
 import shutil
+import torch.nn.functional as F
 
 def tokenize_wav(wav_path,audiodec,device,sample_rate=24000):
     wav, sr = torchaudio.load(wav_path)
+    print("origial sampling rate",sr)
     if sr != sample_rate:
         wav = torchaudio.functional.resample(wav, sr, sample_rate)    
     with torch.no_grad():
@@ -23,17 +25,23 @@ def tokenize_wav(wav_path,audiodec,device,sample_rate=24000):
         idx = idx.cpu() - inc.reshape(-1,1)
         return idx.numpy().T
 
-dataset = load_dataset("hf-internal-testing/librispeech_asr_demo", "clean", split="validation")
-dataset = dataset.sort("id")
-sampling_rate = dataset.features["audio"].sampling_rate
+#dataset = load_dataset("hf-internal-testing/librispeech_asr_demo", "clean", split="validation")
+#dataset = dataset.sort("id")
+#sampling_rate = dataset.features["audio"].sampling_rate
 
 processor = AutoProcessor.from_pretrained("facebook/wav2vec2-conformer-rope-large-960h-ft")
 model = Wav2Vec2ConformerModel.from_pretrained("facebook/wav2vec2-conformer-rope-large-960h-ft")
 
 # audio file is decoded on the fly
 # might need to add batch dimension wax.unsqueeze(0)
-
-inputs = processor(wav, sampling_rate=sampling_rate, return_tensors="pt")
+wav_path = 'input.wav'
+asr_sample_rate = 16000
+wav, sr = torchaudio.load(wav_path) #C T-> 1 C T
+print("wav shape",wav.shape)  
+if sr != asr_sample_rate:
+    wav = torchaudio.functional.resample(wav, sr, asr_sample_rate)
+wav = wav.squeeze(0)
+inputs = processor(wav, sampling_rate=asr_sample_rate, return_tensors="pt")
 with torch.no_grad():
     outputs = model(**inputs)
 
@@ -47,21 +55,16 @@ audiodec = AudioDec(tx_device=device , rx_device=device )
 audiodec.load_transmitter(encoder_checkpoint)
 audiodec.load_receiver(encoder_checkpoint, decoder_checkpoint)
 
-prompt_token = tokenize_wav('input.wav',audiodec,device,sample_rate)
-print("audio prompt",prompt_token)
+prompt_token = tokenize_wav(wav_path,audiodec,device,sample_rate)
 print('audio prompt shape',prompt_token.shape)
-print("audio promt len",len(prompt_token[0]))
+
+#align ASR output to shape of prompt audio tokens
+last_hidden_states_permuted = last_hidden_states.permute(0, 2, 1)
+upsampled_hidden_states_tensor_permuted = F.interpolate(last_hidden_states_permuted, size=len(prompt_token), mode='linear',align_corners=True)
+upsampled_hidden_states_tensor_permuted = upsampled_hidden_states_tensor_permuted.permute(0, 2, 1)
+print("interpolated last hidden state shape",upsampled_hidden_states_tensor_permuted.shape)
 
 
-for time_slice in range(len(prompt_token)):
-    print(prompt_token[time_slice])
-
-
-# next we need to align promt_token and last_hidden_states to same length
-
-# using something like promt_token // len(last_hidden_states) , and add last_hidden_states[slice] , to prompt_token[previous_slice_length_end:previous_slice_length_end+slice_length] , where slice_length = promt_token // len(last_hidden_states)
-
-# apply a length regulator for compression, with something like , pool(prompt_token[:compression ratio])
 
 
 
