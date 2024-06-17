@@ -25,15 +25,9 @@ def tokenize_wav(wav_path,audiodec,device,sample_rate=24000):
         idx = idx.cpu() - inc.reshape(-1,1)
         return idx.numpy().T
 
-#dataset = load_dataset("hf-internal-testing/librispeech_asr_demo", "clean", split="validation")
-#dataset = dataset.sort("id")
-#sampling_rate = dataset.features["audio"].sampling_rate
-
 processor = AutoProcessor.from_pretrained("facebook/wav2vec2-conformer-rope-large-960h-ft")
 model = Wav2Vec2ConformerModel.from_pretrained("facebook/wav2vec2-conformer-rope-large-960h-ft")
 
-# audio file is decoded on the fly
-# might need to add batch dimension wax.unsqueeze(0)
 wav_path = 'input.wav'
 asr_sample_rate = 16000
 wav, sr = torchaudio.load(wav_path) #C T-> 1 C T
