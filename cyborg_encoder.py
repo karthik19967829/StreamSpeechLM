@@ -9,6 +9,7 @@ import time
 import torchaudio
 import shutil
 import torch.nn.functional as F
+import torch.nn as nn
 
 def tokenize_wav(wav_path,audiodec,device,sample_rate=24000):
     wav, sr = torchaudio.load(wav_path)
@@ -50,7 +51,9 @@ audiodec.load_transmitter(encoder_checkpoint)
 audiodec.load_receiver(encoder_checkpoint, decoder_checkpoint)
 
 prompt_token = tokenize_wav(wav_path,audiodec,device,sample_rate)
+print(prompt_token[:4])
 print('audio prompt shape',prompt_token.shape)
+print("audio prompt dtype",type(prompt_token))
 
 #align ASR output to shape of prompt audio tokens
 last_hidden_states_permuted = last_hidden_states.permute(0, 2, 1)
@@ -59,6 +62,32 @@ upsampled_hidden_states_tensor_permuted = upsampled_hidden_states_tensor_permute
 print("interpolated last hidden state shape",upsampled_hidden_states_tensor_permuted.shape)
 
 # embed audio tokens 
+audiodec_embedding = nn.Embedding(num_embeddings=1024, embedding_dim=128)
+prompt_token = torch.from_numpy(prompt_token)
+embedded_tokens = audiodec_embedding(prompt_token)  # Shape will be [4, 8, 128]
+fused_embeddings = embedded_tokens.view(embedded_tokens.size(0), -1)
+print("Fused Embeddings Shape:", fused_embeddings.shape)
+audio_projection_layer = nn.Linear(in_features=1024, out_features=1024)
+asr_projecttion_layer = nn.Linear(in_features=1024, out_features=1024)
+
+projected_audiodec_embedding = audio_projection_layer(fused_embeddings)
+projected_asr_embeddings = asr_projecttion_layer(upsampled_hidden_states_tensor_permuted)
+
+
+print("projected audio shape",projected_audiodec_embedding.shape)
+print("projected asr embedding shape",projected_asr_embeddings.shape)
+
+cross_embedded = torch.empty(2 * len(prompt_token), 1024)
+
+# Assign embeddings to even and odd indices
+cross_embedded[0::2, :] = projected_asr_embeddings        # ASR embeddings on even indices
+cross_embedded[1::2, :] = projected_audiodec_embedding  # AudioDec embeddings on odd indices
+
+print("cross embedding shape",cross_embedded.shape)
+
+
+
+
 
 
 
