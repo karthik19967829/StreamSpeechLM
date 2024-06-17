@@ -1,7 +1,5 @@
 from transformers import AutoProcessor, Wav2Vec2ConformerModel
 import torch
-from datasets import load_dataset
-import soundfile as SF
 from utils.audiodec import AudioDec, assign_model
 import  os
 import torch
@@ -9,7 +7,6 @@ import numpy as np
 from tqdm import tqdm
 import time
 import torchaudio
-import soundfile as sf
 import shutil
 
 def tokenize_wav(wav_path,audiodec,device,sample_rate=24000):
