@@ -85,6 +85,48 @@ cross_embedded[1::2, :] = projected_audiodec_embedding  # AudioDec embeddings on
 
 print("cross embedding shape",cross_embedded.shape)
 
+from transformers import LlamaModel, LlamaConfig
+
+configuration = LlamaConfig()
+
+configuration.hidden_size = 1024
+configuration.num_hidden_layers = 6
+configuration.num_attention_heads = 8
+configuration.num_key_value_heads = 8
+configuration.intermediate_size= 4096
+
+
+print("configuration",configuration)
+model = LlamaModel(configuration)
+
+print(model)
+
+
+
+
+if cross_embedded.dim() == 2:
+    cross_embedded = cross_embedded.unsqueeze(0)  # Add batch dimension if needed
+
+sequence_length = cross_embedded.size(1)
+print("sequence lenght",sequence_length)
+position_ids = torch.arange(sequence_length).unsqueeze(0).repeat(cross_embedded.size(0), 1)  # repeat for batch size
+# Forward pass through the model
+# Initialize hidden states variable, this will be updated with each layer's output
+hidden_states = cross_embedded
+print("position ids",position_ids.shape)
+print("hidden states",hidden_states.shape)
+for layer in model.layers:
+    layer_outputs = layer(hidden_states, position_ids=position_ids)
+    hidden_states = layer_outputs[0]  # Only take the output, ignore attention weights
+
+hidden_states = model.norm(hidden_states)
+
+print("Output shape from transformer layers:", hidden_states.shape)
+
+
+
+
+
 
 
 
