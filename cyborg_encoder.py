@@ -58,6 +58,14 @@ upsampled_hidden_states_tensor_permuted = F.interpolate(last_hidden_states_permu
 upsampled_hidden_states_tensor_permuted = upsampled_hidden_states_tensor_permuted.permute(0, 2, 1)
 print("interpolated last hidden state shape",upsampled_hidden_states_tensor_permuted.shape)
 
+# embed audio tokens 
+
+
+
+
+
+
+
 
 
 
