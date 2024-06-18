@@ -61,5 +61,26 @@ Next steps:
 1. Embed audio tokens 8 to Embeddings concatenated and projected to a single dimension (de-risked)
 2. Project both ASR embedding and audio token embedding to same dimension (de-risked)
 
+June 17th 
+1. Aligning bottle neck regulator with length interpolation  
+2. Added llama lm
+3. Acoustic predictor
+
+Next steps:
+1. Add training workflow , train on VCC2020 Task2
+
+June 18th 
+1. Added VCC2020 dataset exploration 
+2. Added rough GPT-4 based refactored code , do more thorough testing and then merge 
+
+Next steps:
+1. Add training workflow, train on VCC2020 Task2
+2. The source and target length are not exactly same (we might have to set the target length and make source length, or fix the source length and make target of the same shape) , what ever is the strategy is the decoded idea before finalizing
+3. Add data loader
+4. Make everything a torch nn.module, prepare data accordingly
+5. Generate synthetic audio data using elevanlabs API
+6. Train one iteration model , do one full cycle and then iterate from there 
+   
+
 
 
