@@ -39,6 +39,8 @@ wget https://github.com/facebookresearch/AudioDec/releases/download/pretrain_mod
 apt-get update
 apt-get install unzip
 unzip exp.zip
+#get data using the following
+git clone https://github.com/nii-yamagishilab/VCC2020-database/blob/master/vcc2020_task_explanation.txt
 ```
 
 ## Progress tracker 
