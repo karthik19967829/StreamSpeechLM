@@ -83,6 +83,13 @@ Next steps:
 5. Generate synthetic audio data using elevanlabs API
 6. Train one iteration model , do one full cycle and then iterate from there 
    
+June 18th 
+1. Added code reference for eleven labs data distillation
 
+Next Steps:
+1. Create Nikhil's voice on eleven labs
+2. Run inference on all Male utterances of VCC2020 Task 1/2
+3. Create a dataset in CSV / write output in files _ Nikhil
+4. Verify AudioDec length if its the same , then proceed with the training code 
 
 
