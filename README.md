@@ -92,4 +92,19 @@ Next Steps:
 3. Create a dataset in CSV / write output in files _ Nikhil
 4. Verify AudioDec length if its the same , then proceed with the training code 
 
+June 20th 
+1. Added forward pass for train/inference for CyborgEncoder (ASR/Audiodec/LLama/Acoustic Predictor)
+
+Next Steps:
+1. fix the code for correctness / optimize linear algebra with GPT-4
+2. add cross entropy loss and do one step forward / backward pass
+3. create a simple data-loader that gets input/output wav from VCC2020 Task 1/2 (or from LibriTTS , better to keep it to something Audiodec was trained on)  
+4. Add Pad ID to the embedding of llama model (just have a PAD tensor) , if padding is needed during batching
+5. Do one iteration of train/eval the pipeline
+6. Iterate above till you get some model , thats working as a baseline
+7. Add bottle neck regulator / Teacher forcing loss for future prediction (this will make edge predictions easier)  
+8. Create Nikhil's voice on eleven labs 
+9. Run inference on all Male utterances of VCC2020 Task 1/2
+10. Create a dataset in CSV / write output in files _ Nikhil
+11. DO continued training of AudioDec on the above  
 
