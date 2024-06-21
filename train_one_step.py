@@ -37,7 +37,17 @@ class AutoregressivePredictor(nn.Module):
                     token_embedding = token_embedding.unsqueeze(0)
                     current_input = torch.cat([current_input, token_embedding], dim=1)
                 # append this time stamps to prediction to chunk level 
-                chunk_predicted_tokens.append(timestamp_predicted_tokens)     
+                chunk_predicted_tokens.append(timestamp_predicted_tokens)
+        else:
+            for time_index in range(chunk_hidden_states.size(1)):
+                current_input = chunk_hidden_states[:,time_index,:]
+                outputs = self.acoustic_predictor_model.layers[0](current_input,position_ids = torch.arange(0, current_input.shape[1]).unsqueeze(0))
+                transformed_logits = self.output_layer(outputs[0][:,:, :])
+                print("transformed logit",transformed_logits.shape)
+                probabilities = F.softmax(transformed_logits, dim=-1)
+                predicted_token = torch.argmax(probabilities, dim=-1)
+                chunk_predicted_tokens.append(predicted_token)
+                
         #print("predicted tokens",predicted_tokens)
         return chunk_predicted_tokens  # Shape: [batch_size, 8]
 
@@ -70,7 +80,7 @@ class CyborgEncoder(nn.Module):
         )
         self.ar_predictor = AutoregressivePredictor(self.ar_predictor_config)
         
-    def forward(self, wav_path, device='cpu', asr_sample_rate=16000, sample_rate=24000):
+    def forward(self, wav_path,output_wav_path,device='cpu', asr_sample_rate=16000, sample_rate=24000):
         wav, sr = torchaudio.load(wav_path)
         if sr != asr_sample_rate:
             wav = torchaudio.functional.resample(wav, sr, asr_sample_rate)
@@ -78,7 +88,10 @@ class CyborgEncoder(nn.Module):
         inputs = self.asr_processor(wav, sampling_rate=asr_sample_rate, return_tensors="pt")
         with torch.no_grad():
             outputs = self.asr_model(**inputs)
-        prompt_token = self.tokenize_wav(wav_path, self.audiodec, device, sample_rate)    
+        prompt_token = self.tokenize_wav(wav_path, self.audiodec, device, sample_rate)
+        output_prompt_token = self.tokenize_wav(output_wav_path, self.audiodec, device, sample_rate)
+        min_length = min(len(prompt_token),len(output_prompt_token))
+        prompt_token,output_prompt_token =  prompt_token[:min_length,:],output_prompt_token[:min_length,:]   
         last_hidden_states = outputs.last_hidden_state
         last_hidden_states_permuted = last_hidden_states.permute(0, 2, 1)
         upsampled_hidden_states_tensor_permuted = F.interpolate(last_hidden_states_permuted, size=len(prompt_token), mode='linear',align_corners=True)
@@ -111,7 +124,11 @@ class CyborgEncoder(nn.Module):
 
         hidden_states = self.llama_model.norm(hidden_states) 
         print("hidden states 0 shape",hidden_states.shape)
-        predicted_sequence = self.ar_predictor(hidden_states)
+        # lets add append the at the chunk level
+        ar_input_chunks = []
+        for time_index in range(hidden_states.size(1)):
+            ar_input_chunks.append(torch.cat(self.ar_predictor.embedding(hidden_states[:,time_index,:].squeeze(0)),self.ar_predictor.embedding(output_prompt_token[time_index][:-1]),dim=0))
+        predicted_sequence = self.ar_predictor(ar_input_chunks)
         return predicted_sequence
     
     def tokenize_wav(self, wav_path, audiodec, device, sample_rate):
