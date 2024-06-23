@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import torchaudio
 from transformers import AutoProcessor, Wav2Vec2ConformerModel, LlamaModel, LlamaConfig
 from utils.audiodec import AudioDec, assign_model
-
+import torch.optim as optim
 
 class AutoregressivePredictor(nn.Module):
     def __init__(self, config):
@@ -267,6 +267,33 @@ audiodec.load_transmitter(encoder_checkpoint)
 audiodec.load_receiver(encoder_checkpoint, decoder_checkpoint)
 
 cyborg_encoder = CyborgEncoder(asr_processor, asr_model, audiodec)
+# Setup the AdamW optimizer
+optimizer = optim.AdamW(cyborg_encoder.parameters(), lr=0.001)
+
+def train_model(model, wav_path, output_wav_path, device, optimizer):
+    model.train()  # Set model to training mode
+    optimizer.zero_grad()  # Clear gradients before calculating new ones
+
+    # Forward pass: Compute predicted loss by passing inputs to the model
+    loss = model(wav_path, output_wav_path, device=device, inference=False)
+
+    # Backward pass: Perform backpropagation to calculate gradients
+    loss.backward()
+
+    # Optimizer step: Update model parameters
+    optimizer.step()
+
+    return loss.item()
+
 wav_path = "input.wav"
-loss = cyborg_encoder(wav_path, wav_path)
-print("total loss", loss)
+output_wav_path = "input.wav"
+
+# Train the model for 1000 steps
+num_steps = 1000
+for step in range(num_steps):
+    loss = train_model(cyborg_encoder, wav_path, output_wav_path, device, optimizer)
+
+    if step % 10 == 0:  # Print the loss every 10 steps
+        print(f"Step {step}/{num_steps}, Loss: {loss}")
+
+print("Training complete.")
