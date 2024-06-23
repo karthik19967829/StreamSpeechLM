@@ -106,5 +106,24 @@ Next Steps:
 8. Create Nikhil's voice on eleven labs 
 9. Run inference on all Male utterances of VCC2020 Task 1/2
 10. Create a dataset in CSV / write output in files _ Nikhil
-11. DO continued training of AudioDec on the above  
+
+Jun 22nd 
+1. Added Teacher loss
+2. Added cross-entropy loss
+3. Added training loop
+4. Added save functionality 
+
+Notes: Model is now 2.3 GB because of 2.2 GB ASR Model 
+
+Next steps:
+1. Load this model and do inference on the overfitted example, just to ensure decoding works
+2. Prepare the dataset and do a larger scale training to overfit on VCC2020
+3. Inference and check for different source speakers
+4. De-risk inference by using a smaller streaming based ASR model for smaller size
+5. figure out how to run inference efficiently with some simulated streaming and benchmark the RTF / latency
+6. Export with ONNX / other techniques to speed up further
+7. Add Multi processing across timesteps for AR predictor 
+8. scale training data / add elevan labs based synthetic dataset for Nikhil/ a target speaker 
+9. Add pytorch based distributed training to train across Multiple GPUs when needed 
+12. DO continued training of AudioDec on the above  
 
