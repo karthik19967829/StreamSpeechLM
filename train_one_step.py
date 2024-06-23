@@ -34,9 +34,10 @@ class AutoregressivePredictor(nn.Module):
                 position_ids=torch.arange(0, chunk_hidden_states.shape[1]).unsqueeze(0),
             )
             transformed_logits = self.output_layer(outputs[0])
-            probabilities = F.softmax(transformed_logits, dim=-1)
-            predicted_tokens = torch.argmax(probabilities, dim=-1)
-            return predicted_tokens  # Directly returning the tensor
+            transformed_logits = transformed_logits.view(
+                -1, 8, 1024
+            )  # Ensure logits are shaped as (num_timesteps, 8, 1024)
+            return transformed_logits
 
     def autoregressively_generate_tokens(self, current_input):
         predicted_tokens = torch.empty(
@@ -92,6 +93,8 @@ class CyborgEncoder(nn.Module):
             intermediate_size=4096,
         )
         self.ar_predictor = AutoregressivePredictor(self.ar_predictor_config)
+        self.cross_entropy_loss_fn = nn.CrossEntropyLoss()
+        self.k = 4
 
     def forward(
         self,
@@ -186,8 +189,10 @@ class CyborgEncoder(nn.Module):
         hidden_states = hidden_states + upward_projected_context_hidden_state
         if inference:
             predicted_sequence = self.ar_predictor(hidden_states, inference=True)
+            return predicted_sequence
         else:
             hidden_states = hidden_states.permute(1, 0, 2)
+            target_output_token_tensor = torch.from_numpy(output_prompt_token)
             output_prompt_token_tensor = torch.from_numpy(
                 output_prompt_token[:, :7]
             ).long()
@@ -197,13 +202,18 @@ class CyborgEncoder(nn.Module):
             chunk_tensor = torch.cat(
                 (hidden_states, output_prompt_token_embeddings), dim=1
             )
-            predicted_sequence = self.ar_predictor(chunk_tensor, inference=False)
-
-            return (
-                predicted_sequence,
-                context_hidden_state,
-                upsampled_hidden_states_tensor_permuted,
+            predicted_logits = self.ar_predictor(chunk_tensor, inference=False)
+            one_hot_encoded = F.one_hot(
+                target_output_token_tensor, num_classes=1024
+            ).float()
+            cross_entropy_loss = self.cross_entropy_loss_fn(
+                predicted_logits, one_hot_encoded
             )
+            teacher_force_loss = self.calculate_tf_loss(
+                context_hidden_state, upsampled_hidden_states_tensor_permuted
+            )
+            total_loss = cross_entropy_loss + teacher_force_loss
+            return total_loss
 
     def tokenize_wav(self, wav_path, audiodec, device, sample_rate):
         wav, sr = torchaudio.load(wav_path)
@@ -216,6 +226,30 @@ class CyborgEncoder(nn.Module):
         inc = torch.arange(8) * 1024
         idx = (idx.cpu() - inc.reshape(-1, 1)).numpy().T
         return idx
+
+    def calculate_tf_loss(self, context_vectors, semantic_features):
+        batch_size, time_steps, _ = semantic_features.shape
+        losses = []
+        # Loop over time to calculate loss for each timestep considering future steps up to t+k
+        for t in range(time_steps - self.k):
+            # Ground truth context is concatenation of semantic features from t to t+k
+            ground_truth = semantic_features[:, t : t + self.k].reshape(
+                batch_size, -1
+            )  # Reshape to [batch_size, (k+1)*feature_dim]
+            prediction = (
+                context_vectors[:, t]
+                .unsqueeze(1)
+                .repeat(1, self.k, 1)
+                .reshape(batch_size, -1)
+            )
+
+            # Calculate MSE loss
+            mse_loss = F.mse_loss(prediction, ground_truth)
+            losses.append(mse_loss)
+
+        # Average loss over all considered timesteps
+        tf_total_loss = torch.mean(torch.stack(losses))
+        return tf_total_loss
 
 
 # Usage
@@ -234,9 +268,5 @@ audiodec.load_receiver(encoder_checkpoint, decoder_checkpoint)
 
 cyborg_encoder = CyborgEncoder(asr_processor, asr_model, audiodec)
 wav_path = "input.wav"
-predicted_sequence, context_hidden_state, upsampled_hidden_states_tensor_permuted = (
-    cyborg_encoder(wav_path, wav_path)
-)
-print("predicted output tokens", predicted_sequence)
-print("context_hidden_state shape", context_hidden_state.shape)
-print("Teacher ASR hidden states", upsampled_hidden_states_tensor_permuted.shape)
+loss = cyborg_encoder(wav_path, wav_path)
+print("total loss", loss)
