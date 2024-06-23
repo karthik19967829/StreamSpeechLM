@@ -70,7 +70,10 @@ class CyborgEncoder(nn.Module):
         self.audiodec = audiodec
         self.audiodec_embedding = nn.Embedding(num_embeddings=1024, embedding_dim=128)
         self.audio_projection_layer = nn.Linear(in_features=1024, out_features=1024)
-        self.asr_projection_layer = nn.Linear(in_features=1024, out_features=1024)
+        # bottleneck regulator
+        self.asr_down_projection_layer = nn.Linear(in_features=1024, out_features=512)
+        self.asr_upward_projection_layer = nn.Linear(in_features=512, out_features=1024)
+        self.context_linear_prediction = nn.Linear(in_features=1024, out_features=1024)
 
         # Configure the Llama model for ASR embeddings
         llama_config = LlamaConfig(
@@ -97,7 +100,7 @@ class CyborgEncoder(nn.Module):
         device="cpu",
         asr_sample_rate=16000,
         sample_rate=24000,
-        inference=True,
+        inference=False,
     ):
         wav, sr = torchaudio.load(wav_path)
         if sr != asr_sample_rate:
@@ -109,14 +112,15 @@ class CyborgEncoder(nn.Module):
         with torch.no_grad():
             outputs = self.asr_model(**inputs)
         prompt_token = self.tokenize_wav(wav_path, self.audiodec, device, sample_rate)
-        output_prompt_token = self.tokenize_wav(
-            output_wav_path, self.audiodec, device, sample_rate
-        )
-        min_length = min(len(prompt_token), len(output_prompt_token))
-        prompt_token, output_prompt_token = (
-            prompt_token[:min_length, :],
-            output_prompt_token[:min_length, :],
-        )
+        if not inference:
+            output_prompt_token = self.tokenize_wav(
+                output_wav_path, self.audiodec, device, sample_rate
+            )
+            min_length = min(len(prompt_token), len(output_prompt_token))
+            prompt_token, output_prompt_token = (
+                prompt_token[:min_length, :],
+                output_prompt_token[:min_length, :],
+            )
         last_hidden_states = outputs.last_hidden_state
         last_hidden_states_permuted = last_hidden_states.permute(0, 2, 1)
         upsampled_hidden_states_tensor_permuted = F.interpolate(
@@ -133,10 +137,13 @@ class CyborgEncoder(nn.Module):
         fused_embeddings = embedded_tokens.view(embedded_tokens.size(0), -1)
 
         projected_audiodec_embedding = self.audio_projection_layer(fused_embeddings)
-        projected_asr_embeddings = self.asr_projection_layer(
+        # bottle neck regulator
+        down_projected_context_hidden_state = self.asr_down_projection_layer(
             upsampled_hidden_states_tensor_permuted
         )
-
+        projected_asr_embeddings = self.asr_upward_projection_layer(
+            down_projected_context_hidden_state
+        )
         cross_embedded = torch.empty(2 * len(prompt_token), 1024)
 
         # Assign embeddings to even and odd indices
@@ -166,6 +173,17 @@ class CyborgEncoder(nn.Module):
         hidden_states = self.llama_model.norm(hidden_states)
         # get the semantic hidden states
         hidden_states = hidden_states[:, 0::2, :]
+        # semantic contenxtual the hidden states
+        context_hidden_state = self.context_linear_prediction(hidden_states)
+        # bottle neck regulator
+        down_projected_context_hidden_state = self.asr_down_projection_layer(
+            context_hidden_state
+        )
+        upward_projected_context_hidden_state = self.asr_upward_projection_layer(
+            down_projected_context_hidden_state
+        )
+        # add this to hidden states
+        hidden_states = hidden_states + upward_projected_context_hidden_state
         if inference:
             predicted_sequence = self.ar_predictor(hidden_states, inference=True)
         else:
@@ -181,7 +199,11 @@ class CyborgEncoder(nn.Module):
             )
             predicted_sequence = self.ar_predictor(chunk_tensor, inference=False)
 
-        return predicted_sequence
+            return (
+                predicted_sequence,
+                context_hidden_state,
+                upsampled_hidden_states_tensor_permuted,
+            )
 
     def tokenize_wav(self, wav_path, audiodec, device, sample_rate):
         wav, sr = torchaudio.load(wav_path)
@@ -212,5 +234,9 @@ audiodec.load_receiver(encoder_checkpoint, decoder_checkpoint)
 
 cyborg_encoder = CyborgEncoder(asr_processor, asr_model, audiodec)
 wav_path = "input.wav"
-predicted_tokens = cyborg_encoder(wav_path, wav_path)
-print("predicted output tokens", predicted_tokens)
+predicted_sequence, context_hidden_state, upsampled_hidden_states_tensor_permuted = (
+    cyborg_encoder(wav_path, wav_path)
+)
+print("predicted output tokens", predicted_sequence)
+print("context_hidden_state shape", context_hidden_state.shape)
+print("Teacher ASR hidden states", upsampled_hidden_states_tensor_permuted.shape)
