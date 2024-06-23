@@ -5,6 +5,7 @@ import torchaudio
 from transformers import AutoProcessor, Wav2Vec2ConformerModel, LlamaModel, LlamaConfig
 from utils.audiodec import AudioDec, assign_model
 
+
 class AutoregressivePredictor(nn.Module):
     def __init__(self, config):
         super(AutoregressivePredictor, self).__init__()
@@ -12,44 +13,54 @@ class AutoregressivePredictor(nn.Module):
         self.embedding = nn.Embedding(1024, 1024)
         self.output_layer = nn.Linear(config.hidden_size, 1024)
 
-    def forward(self, chunk_hidden_states , inference=True):
-        chunk_predicted_tokens = []
+    def forward(self, chunk_hidden_states, inference=True):
         if inference:
-            print("total time steps",chunk_hidden_states.size(1))
-            for time_index in range(chunk_hidden_states.size(1)):
-                current_input = chunk_hidden_states[:,time_index,:].unsqueeze(0)
-                timestamp_predicted_tokens = []
-        
-                for position in range(8):  # Generate 8 tokens autoregressively
-                    # Forward pass through the model
-                    outputs = self.acoustic_predictor_model.layers[0](current_input,position_ids = torch.arange(0, current_input.shape[1]).unsqueeze(0))
-                    print("outputs shape",outputs[0].shape)
-                    #logits = outputs[0].last_hidden_state[:, -1, :]
-                    transformed_logits = self.output_layer(outputs[0][:, -1, :])
-                    print("transformed logit",transformed_logits.shape)
-                    probabilities = F.softmax(transformed_logits, dim=-1)
-                    predicted_token = torch.argmax(probabilities, dim=-1)
-                    timestamp_predicted_tokens.append(predicted_token.item())
-                    #logits = outputs[0].logits  # Shape: [batch_size, seq_length, vocab_size]
-                    # Prepare the input for the next step
-                    token_embedding = self.embedding(predicted_token)
-                    print("current input shape",current_input.shape,"token embedding shape",token_embedding.shape)
-                    token_embedding = token_embedding.unsqueeze(0)
-                    current_input = torch.cat([current_input, token_embedding], dim=1)
-                # append this time stamps to prediction to chunk level 
-                chunk_predicted_tokens.append(timestamp_predicted_tokens)
+            num_time_steps = chunk_hidden_states.size(1)
+            # Initialize tensor to hold all predicted tokens
+            chunk_predicted_tokens = torch.empty((num_time_steps, 8), dtype=torch.long)
+            # during final inference optimization , need to run this across multiple process cores
+            for time_index in range(num_time_steps):
+                current_input = chunk_hidden_states[:, time_index, :].unsqueeze(0)
+                timestamp_predicted_tokens = self.autoregressively_generate_tokens(
+                    current_input
+                )
+                chunk_predicted_tokens[time_index, :] = timestamp_predicted_tokens
+
+            return chunk_predicted_tokens
+
         else:
-            for time_index in range(chunk_hidden_states.size(1)):
-                current_input = chunk_hidden_states[:,time_index,:]
-                outputs = self.acoustic_predictor_model.layers[0](current_input,position_ids = torch.arange(0, current_input.shape[1]).unsqueeze(0))
-                transformed_logits = self.output_layer(outputs[0][:,:, :])
-                print("transformed logit",transformed_logits.shape)
-                probabilities = F.softmax(transformed_logits, dim=-1)
-                predicted_token = torch.argmax(probabilities, dim=-1)
-                chunk_predicted_tokens.append(predicted_token)
-                
-        #print("predicted tokens",predicted_tokens)
-        return chunk_predicted_tokens  # Shape: [batch_size, 8]
+            outputs = self.acoustic_predictor_model.layers[0](
+                chunk_hidden_states,
+                position_ids=torch.arange(0, chunk_hidden_states.shape[1]).unsqueeze(0),
+            )
+            transformed_logits = self.output_layer(outputs[0])
+            probabilities = F.softmax(transformed_logits, dim=-1)
+            predicted_tokens = torch.argmax(probabilities, dim=-1)
+            return predicted_tokens  # Directly returning the tensor
+
+    def autoregressively_generate_tokens(self, current_input):
+        predicted_tokens = torch.empty(
+            8, dtype=torch.long
+        )  # Tensor for the predicted tokens
+
+        for position in range(8):  # Autoregressive generation of 8 tokens
+            outputs = self.acoustic_predictor_model.layers[0](
+                current_input,
+                position_ids=torch.arange(0, current_input.shape[1]).unsqueeze(0),
+            )
+            transformed_logits = self.output_layer(outputs[0][:, -1, :])
+            probabilities = F.softmax(transformed_logits, dim=-1)
+            predicted_token = torch.argmax(probabilities, dim=-1)
+            predicted_tokens[position] = (
+                predicted_token  # Store directly into the tensor
+            )
+
+            # Get token embedding and prepare for the next step
+            token_embedding = self.embedding(predicted_token).unsqueeze(0)
+            current_input = torch.cat([current_input, token_embedding], dim=1)
+
+        return predicted_tokens
+
 
 class CyborgEncoder(nn.Module):
     def __init__(self, asr_processor, asr_model, audiodec):
@@ -61,14 +72,13 @@ class CyborgEncoder(nn.Module):
         self.audio_projection_layer = nn.Linear(in_features=1024, out_features=1024)
         self.asr_projection_layer = nn.Linear(in_features=1024, out_features=1024)
 
-        
         # Configure the Llama model for ASR embeddings
         llama_config = LlamaConfig(
             hidden_size=1024,
             num_hidden_layers=6,
             num_attention_heads=8,
             num_key_value_heads=8,
-            intermediate_size=4096
+            intermediate_size=4096,
         )
         self.llama_model = LlamaModel(llama_config)
         self.ar_predictor_config = LlamaConfig(
@@ -76,61 +86,103 @@ class CyborgEncoder(nn.Module):
             num_hidden_layers=1,
             num_attention_heads=4,
             num_key_value_heads=4,
-            intermediate_size=4096
+            intermediate_size=4096,
         )
         self.ar_predictor = AutoregressivePredictor(self.ar_predictor_config)
-        
-    def forward(self, wav_path,output_wav_path,device='cpu', asr_sample_rate=16000, sample_rate=24000):
+
+    def forward(
+        self,
+        wav_path,
+        output_wav_path,
+        device="cpu",
+        asr_sample_rate=16000,
+        sample_rate=24000,
+        inference=True,
+    ):
         wav, sr = torchaudio.load(wav_path)
         if sr != asr_sample_rate:
             wav = torchaudio.functional.resample(wav, sr, asr_sample_rate)
         wav = wav.squeeze(0)
-        inputs = self.asr_processor(wav, sampling_rate=asr_sample_rate, return_tensors="pt")
+        inputs = self.asr_processor(
+            wav, sampling_rate=asr_sample_rate, return_tensors="pt"
+        )
         with torch.no_grad():
             outputs = self.asr_model(**inputs)
         prompt_token = self.tokenize_wav(wav_path, self.audiodec, device, sample_rate)
-        output_prompt_token = self.tokenize_wav(output_wav_path, self.audiodec, device, sample_rate)
-        min_length = min(len(prompt_token),len(output_prompt_token))
-        prompt_token,output_prompt_token =  prompt_token[:min_length,:],output_prompt_token[:min_length,:]   
+        output_prompt_token = self.tokenize_wav(
+            output_wav_path, self.audiodec, device, sample_rate
+        )
+        min_length = min(len(prompt_token), len(output_prompt_token))
+        prompt_token, output_prompt_token = (
+            prompt_token[:min_length, :],
+            output_prompt_token[:min_length, :],
+        )
         last_hidden_states = outputs.last_hidden_state
         last_hidden_states_permuted = last_hidden_states.permute(0, 2, 1)
-        upsampled_hidden_states_tensor_permuted = F.interpolate(last_hidden_states_permuted, size=len(prompt_token), mode='linear',align_corners=True)
-        upsampled_hidden_states_tensor_permuted = upsampled_hidden_states_tensor_permuted.permute(0, 2, 1)
-        
+        upsampled_hidden_states_tensor_permuted = F.interpolate(
+            last_hidden_states_permuted,
+            size=len(prompt_token),
+            mode="linear",
+            align_corners=True,
+        )
+        upsampled_hidden_states_tensor_permuted = (
+            upsampled_hidden_states_tensor_permuted.permute(0, 2, 1)
+        )
+
         embedded_tokens = self.audiodec_embedding(torch.from_numpy(prompt_token))
         fused_embeddings = embedded_tokens.view(embedded_tokens.size(0), -1)
-        
+
         projected_audiodec_embedding = self.audio_projection_layer(fused_embeddings)
-        projected_asr_embeddings = self.asr_projection_layer(upsampled_hidden_states_tensor_permuted)
-        
+        projected_asr_embeddings = self.asr_projection_layer(
+            upsampled_hidden_states_tensor_permuted
+        )
+
         cross_embedded = torch.empty(2 * len(prompt_token), 1024)
 
         # Assign embeddings to even and odd indices
-        cross_embedded[0::2, :] = projected_asr_embeddings        # ASR embeddings on even indices
-        cross_embedded[1::2, :] = projected_audiodec_embedding  # AudioDec embeddings on odd indices
+        cross_embedded[0::2, :] = (
+            projected_asr_embeddings  # ASR embeddings on even indices
+        )
+        cross_embedded[1::2, :] = (
+            projected_audiodec_embedding  # AudioDec embeddings on odd indices
+        )
         if cross_embedded.dim() == 2:
-            cross_embedded = cross_embedded.unsqueeze(0)  # Add batch dimension if needed
+            cross_embedded = cross_embedded.unsqueeze(
+                0
+            )  # Add batch dimension if needed
         sequence_length = cross_embedded.size(1)
-        print("sequence lenght",sequence_length)
-        position_ids = torch.arange(sequence_length).unsqueeze(0).repeat(cross_embedded.size(0), 1)  # repeat for batch size
+        position_ids = (
+            torch.arange(sequence_length).unsqueeze(0).repeat(cross_embedded.size(0), 1)
+        )  # repeat for batch size
         # Forward pass through the model
         # Initialize hidden states variable, this will be updated with each layer's output
         hidden_states = cross_embedded
-        print("position ids",position_ids.shape)
-        print("hidden states",hidden_states.shape)
         for layer in self.llama_model.layers:
             layer_outputs = layer(hidden_states, position_ids=position_ids)
-            hidden_states = layer_outputs[0]  # Only take the output, ignore attention weights
+            hidden_states = layer_outputs[
+                0
+            ]  # Only take the output, ignore attention weights
 
-        hidden_states = self.llama_model.norm(hidden_states) 
-        print("hidden states 0 shape",hidden_states.shape)
-        # lets add append the at the chunk level
-        ar_input_chunks = []
-        for time_index in range(hidden_states.size(1)):
-            ar_input_chunks.append(torch.cat(self.ar_predictor.embedding(hidden_states[:,time_index,:].squeeze(0)),self.ar_predictor.embedding(output_prompt_token[time_index][:-1]),dim=0))
-        predicted_sequence = self.ar_predictor(ar_input_chunks)
+        hidden_states = self.llama_model.norm(hidden_states)
+        # get the semantic hidden states
+        hidden_states = hidden_states[:, 0::2, :]
+        if inference:
+            predicted_sequence = self.ar_predictor(hidden_states, inference=True)
+        else:
+            hidden_states = hidden_states.permute(1, 0, 2)
+            output_prompt_token_tensor = torch.from_numpy(
+                output_prompt_token[:, :7]
+            ).long()
+            output_prompt_token_embeddings = self.ar_predictor.embedding(
+                output_prompt_token_tensor
+            )  # [sequence_length, 7, embedding_size]
+            chunk_tensor = torch.cat(
+                (hidden_states, output_prompt_token_embeddings), dim=1
+            )
+            predicted_sequence = self.ar_predictor(chunk_tensor, inference=False)
+
         return predicted_sequence
-    
+
     def tokenize_wav(self, wav_path, audiodec, device, sample_rate):
         wav, sr = torchaudio.load(wav_path)
         if sr != sample_rate:
@@ -143,17 +195,22 @@ class CyborgEncoder(nn.Module):
         idx = (idx.cpu() - inc.reshape(-1, 1)).numpy().T
         return idx
 
+
 # Usage
-asr_processor = AutoProcessor.from_pretrained("facebook/wav2vec2-conformer-rope-large-960h-ft")
-asr_model = Wav2Vec2ConformerModel.from_pretrained("facebook/wav2vec2-conformer-rope-large-960h-ft")
+asr_processor = AutoProcessor.from_pretrained(
+    "facebook/wav2vec2-conformer-rope-large-960h-ft"
+)
+asr_model = Wav2Vec2ConformerModel.from_pretrained(
+    "facebook/wav2vec2-conformer-rope-large-960h-ft"
+)
 model_name = "libritts_v1"
-device = 'cpu'
+device = "cpu"
 sample_rate, encoder_checkpoint, decoder_checkpoint = assign_model(model_name)
 audiodec = AudioDec(tx_device=device, rx_device=device)
 audiodec.load_transmitter(encoder_checkpoint)
 audiodec.load_receiver(encoder_checkpoint, decoder_checkpoint)
 
 cyborg_encoder = CyborgEncoder(asr_processor, asr_model, audiodec)
-wav_path = 'input.wav'
-output = cyborg_encoder(wav_path)
-print(output)
+wav_path = "input.wav"
+predicted_tokens = cyborg_encoder(wav_path, wav_path)
+print("predicted output tokens", predicted_tokens)
