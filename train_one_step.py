@@ -5,7 +5,7 @@ import torchaudio
 from transformers import AutoProcessor, Wav2Vec2ConformerModel, LlamaModel, LlamaConfig
 from utils.audiodec import AudioDec, assign_model
 import torch.optim as optim
-
+import soundfile as sf
 
 class AutoregressivePredictor(nn.Module):
     def __init__(self, config):
@@ -17,14 +17,18 @@ class AutoregressivePredictor(nn.Module):
     def forward(self, chunk_hidden_states, inference=True):
         if inference:
             num_time_steps = chunk_hidden_states.size(1)
+            #print("num time steps",num_time_steps)
+
             # Initialize tensor to hold all predicted tokens
             chunk_predicted_tokens = torch.empty((num_time_steps, 8), dtype=torch.long)
             # during final inference optimization , need to run this across multiple process cores
             for time_index in range(num_time_steps):
                 current_input = chunk_hidden_states[:, time_index, :].unsqueeze(0)
+                #print("current input",current_input)
                 timestamp_predicted_tokens = self.autoregressively_generate_tokens(
                     current_input
                 )
+                #print("time stamo predicted tokens",timestamp_predicted_tokens)
                 chunk_predicted_tokens[time_index, :] = timestamp_predicted_tokens
 
             return chunk_predicted_tokens
@@ -100,7 +104,7 @@ class CyborgEncoder(nn.Module):
     def forward(
         self,
         wav_path,
-        output_wav_path,
+        output_wav_path=None,
         device="cpu",
         asr_sample_rate=16000,
         sample_rate=24000,
@@ -115,9 +119,10 @@ class CyborgEncoder(nn.Module):
         )
         with torch.no_grad():
             outputs = self.asr_model(**inputs)
-        prompt_token = self.tokenize_wav(wav_path, self.audiodec, device, sample_rate)
+        prompt_token,wav_input = self.tokenize_wav(wav_path, self.audiodec, device, sample_rate)
+        print("Input prompt",prompt_token)
         if not inference:
-            output_prompt_token = self.tokenize_wav(
+            output_prompt_token,wav_output = self.tokenize_wav(
                 output_wav_path, self.audiodec, device, sample_rate
             )
             min_length = min(len(prompt_token), len(output_prompt_token))
@@ -190,7 +195,7 @@ class CyborgEncoder(nn.Module):
         hidden_states = hidden_states + upward_projected_context_hidden_state
         if inference:
             predicted_sequence = self.ar_predictor(hidden_states, inference=True)
-            return predicted_sequence
+            return predicted_sequence,wav_input
         else:
             hidden_states = hidden_states.permute(1, 0, 2)
             target_output_token_tensor = torch.from_numpy(output_prompt_token)
@@ -213,7 +218,7 @@ class CyborgEncoder(nn.Module):
             teacher_force_loss = self.calculate_tf_loss(
                 context_hidden_state, upsampled_hidden_states_tensor_permuted
             )
-            total_loss = cross_entropy_loss + teacher_force_loss
+            total_loss = cross_entropy_loss + 0.1*teacher_force_loss
             return total_loss
 
     def tokenize_wav(self, wav_path, audiodec, device, sample_rate):
@@ -226,7 +231,7 @@ class CyborgEncoder(nn.Module):
             idx = audiodec.tx_encoder.quantize(z)
         inc = torch.arange(8) * 1024
         idx = (idx.cpu() - inc.reshape(-1, 1)).numpy().T
-        return idx
+        return idx,wav
 
     def calculate_tf_loss(self, context_vectors, semantic_features):
         batch_size, time_steps, _ = semantic_features.shape
@@ -298,12 +303,41 @@ wav_path = "input.wav"
 output_wav_path = "input.wav"
 
 # Train the model for 1000 steps
-num_steps = 1000
+num_steps = 11
 for step in range(num_steps):
     loss = train_model(cyborg_encoder, wav_path, output_wav_path, device, optimizer)
 
-    if step % 10 == 0:  # Print the loss every 10 steps
+    if step % 5 == 0:  # Print the loss every 10 steps
         print(f"Step {step}/{num_steps}, Loss: {loss}")
         save_model_only(cyborg_encoder)
 
 print("Training complete.")
+
+#test inference 
+saved_path="cyborg_encoder_model.pth"
+cyborg_encoder.load_state_dict(torch.load(saved_path))
+cyborg_encoder.eval()  # Set the model to evaluation mode
+predicted_sequences,wav_input = cyborg_encoder(wav_path, inference=True)
+print("inference predicted sequences shape",predicted_sequences)
+with torch.no_grad():
+    #create the audio file
+    predicted_sequences = predicted_sequences.T
+    inc = torch.arange(8) * 1024
+    predicted_idx = (predicted_sequences + inc.reshape(-1, 1))
+    predicted_zq = audiodec.rx_encoder.lookup(predicted_idx)
+
+    y = audiodec.decoder.decode(predicted_zq)[:, :, :wav_input.size(-1)]
+    y = y.squeeze(1).transpose(1, 0).cpu().numpy() # T x C
+    sf.write(
+        'predicted_audio.wav',
+        y,
+        24000,
+        "PCM_16",
+    )
+
+
+#print(f"Model loaded from '{path}' and set to evaluation mode")
+
+
+
+
