@@ -42,6 +42,8 @@ unzip exp.zip
 #get data using the following
 git clone https://github.com/nii-yamagishilab/VCC2020-database/blob/master/vcc2020_task_explanation.txt
 ```
+## Run Training/Inference 
+python3.11 train_one_step.py 
 
 ## Progress tracker 
 
