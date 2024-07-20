@@ -95,6 +95,7 @@ class CyborgEncoder(nn.Module):
             num_key_value_heads=8,
             intermediate_size=4096,
         )
+        
         self.llama_model = LlamaModel(llama_config)
         self.ar_predictor_config = LlamaConfig(
             hidden_size=1024,
@@ -258,10 +259,10 @@ audiodec.load_receiver(encoder_checkpoint, decoder_checkpoint)
 
 cyborg_encoder = CyborgEncoder(asr_processor, asr_model, audiodec)
 # Setup the AdamW optimizer
-optimizer = optim.AdamW(cyborg_encoder.parameters(), lr=0.0005)
+optimizer = optim.AdamW(cyborg_encoder.parameters(), lr=0.0001)
 scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.916)  # Exponential decay factor
 
-def train_model(model, wav_path, output_wav_path, device, optimizer,step, accumulation_steps=1):
+def train_model(model, wav_path, output_wav_path, device, optimizer,step, accumulation_steps=32):
     model.train()  # Set model to training mode
     total_loss = 0
 
@@ -277,6 +278,7 @@ def train_model(model, wav_path, output_wav_path, device, optimizer,step, accumu
     if (step + 1) % accumulation_steps == 0:
         optimizer.step()
         optimizer.zero_grad()
+        scheduler.step()
 
     return total_loss
 
@@ -295,7 +297,7 @@ output_wav_path = "vcc_output.wav"
 # Train the model for 1000 steps
 import os
 file_list = os.listdir("/Users/karthikganesan/Downloads/VCC2020-database-master/target_task1/TEF1")
-file_list = file_list[:1]
+file_list = file_list[:5]
 num_steps = 5000
 epochs = 10
 step = 0
@@ -310,7 +312,7 @@ while step<num_steps:
             print(f"Step {step}/{num_steps}, Loss: {loss}")
             save_model_only(cyborg_encoder)
         step = step + 1 #update number of steps    
-    #scheduler.step()  # Update the learning rate after each epoch
+    #  # Update the learning rate after each epoch
     print(f"Learning rate updated to {scheduler.get_last_lr()}")
 
 print("Training complete.")
