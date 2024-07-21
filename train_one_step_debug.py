@@ -6,6 +6,7 @@ from transformers import AutoProcessor, Wav2Vec2ConformerModel, LlamaModel, Llam
 from utils.audiodec import AudioDec, assign_model
 import torch.optim as optim
 import soundfile as sf
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
 '''layer Transformer decoder
 with a hidden size 256, feed-forward hidden size
@@ -16,11 +17,14 @@ https://github.com/b04901014/MQTTS
 1024, and 4 heads'''
 
 class AutoregressivePredictor(nn.Module):
-    def __init__(self, config):
+    def __init__(self):
         super(AutoregressivePredictor, self).__init__()
-        self.acoustic_predictor_model = LlamaModel(config)
-        self.embedding = nn.Embedding(1024, 1024)
-        self.output_layer = nn.Linear(config.hidden_size, 1024)
+        #self.acoustic_predictor_model = LlamaModel(config)
+        llama_model = AutoModelForCausalLM.from_pretrained("meta-llama/Meta-Llama-3-8B") 
+        self.acoustic_predictor_model = llama_model.model.layers[0]
+        self.norm =  llama_model.model.norm
+        self.embedding = nn.Embedding(1024, 4096)
+        self.output_layer = nn.Linear(4096, 1024)
         #self.arp_projection = nn.Linear(1024, 256)
 
     def forward(self, chunk_hidden_states, inference=True):
@@ -41,15 +45,12 @@ class AutoregressivePredictor(nn.Module):
 
         else:
             hidden_states = chunk_hidden_states
-            for layer in self.acoustic_predictor_model.layers:
-                layer_outputs = layer(hidden_states, position_ids=torch.arange(0, chunk_hidden_states.shape[1]).unsqueeze(0))
-                hidden_states = layer_outputs[
+            #for layer in self.acoustic_predictor_model.model.layers[-1]:
+            layer_outputs = self.acoustic_predictor_model(hidden_states, position_ids=torch.arange(0, chunk_hidden_states.shape[1]).unsqueeze(0).to('cuda'))
+            hidden_states = layer_outputs[
                     0
                 ]  # Only take the output, ignore attention weights
-            '''outputs = self.acoustic_predictor_model.layers[0](
-                chunk_hidden_states,
-                position_ids=torch.arange(0, chunk_hidden_states.shape[1]).unsqueeze(0),
-            )'''
+            hidden_states = self.norm(hidden_states)    
             transformed_logits = self.output_layer(hidden_states)
             transformed_logits = transformed_logits.view(
                 -1, 8, 1024
@@ -79,32 +80,38 @@ class AutoregressivePredictor(nn.Module):
 
 
 class CyborgEncoder(nn.Module):
-    def __init__(self, asr_processor, asr_model, audiodec):
+    def __init__(self, audiodec):
         super(CyborgEncoder, self).__init__()
-        self.asr_processor = asr_processor
-        self.asr_model = asr_model
         self.audiodec = audiodec
-        self.audiodec_embedding = nn.Embedding(num_embeddings=1024, embedding_dim=256)
-        self.audio_projection_layer = nn.Linear(in_features=2048, out_features=1024)
+        self.audiodec_embedding = nn.Embedding(num_embeddings=1024, embedding_dim=1024)
+        self.audio_projection_layer = nn.Linear(in_features=8192, out_features=4096)
         # bottleneck regulator
         # Configure the Llama model for ASR embeddings
-        llama_config = LlamaConfig(
+        '''llama_config = LlamaConfig(
             hidden_size=1024,
             num_hidden_layers=6,
             num_attention_heads=8,
             num_key_value_heads=8,
             intermediate_size=4096,
-        )
+        )'''
         
-        self.llama_model = LlamaModel(llama_config)
-        self.ar_predictor_config = LlamaConfig(
-            hidden_size=1024,
+
+        #tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-chat-hf")
+        self.llama_model = AutoModelForCausalLM.from_pretrained("meta-llama/Meta-Llama-3-8B")
+        print("llama model",self.llama_model)
+        
+        
+        #self.llama_model = LlamaModel(llama_config)
+        '''self.ar_predictor_config = LlamaConfig(
+            hidden_size=4096,
             num_hidden_layers=1,
             num_attention_heads=4,
             num_key_value_heads=4,
             intermediate_size=4096,
-        )
-        self.ar_predictor = AutoregressivePredictor(self.ar_predictor_config)
+        )'''
+        #self.ar_predictor = AutoModelForCausalLM.from_pretrained("meta-llama/Meta-Llama-3-8B")
+
+        self.ar_predictor = AutoregressivePredictor()
         self.cross_entropy_loss_fn = nn.CrossEntropyLoss()
         self.k = 4
 
@@ -112,24 +119,26 @@ class CyborgEncoder(nn.Module):
         self,
         wav_path,
         output_wav_path=None,
-        device="cpu",
+        device="cuda",
         asr_sample_rate=16000,
         sample_rate=24000,
         inference=False,
     ):
         prompt_token,wav_input = self.tokenize_wav(wav_path, self.audiodec, device, sample_rate)
-        print("Input prompt shape",prompt_token.shape)
+        prompt_token = prompt_token.to('cuda')
+        #print("Input prompt shape",prompt_token.shape)
         if not inference:
             output_prompt_token,wav_output = self.tokenize_wav(
                 output_wav_path, self.audiodec, device, sample_rate
             )
+            output_prompt_token = output_prompt_token.to('cuda')
             min_length = min(len(prompt_token), len(output_prompt_token))
             prompt_token, output_prompt_token = (
                 prompt_token[:min_length, :],
                 output_prompt_token[:min_length, :],
             )
-
-        embedded_tokens = self.audiodec_embedding(torch.from_numpy(prompt_token))
+        #self.audiodec_embedding.to('cuda') 
+        embedded_tokens = self.audiodec_embedding(prompt_token)
         fused_embeddings = embedded_tokens.view(embedded_tokens.size(0), -1)
 
         projected_audiodec_embedding = self.audio_projection_layer(fused_embeddings)
@@ -143,26 +152,26 @@ class CyborgEncoder(nn.Module):
         sequence_length = cross_embedded.size(1)
         position_ids = (
             torch.arange(sequence_length).unsqueeze(0).repeat(cross_embedded.size(0), 1)
-        )  # repeat for batch size
+        ).to('cuda')  # repeat for batch size
         # Forward pass through the model
         # Initialize hidden states variable, this will be updated with each layer's output
         hidden_states = cross_embedded
-        for layer in self.llama_model.layers:
+        #hidden_states = self.llama_model.model.layers(hidden_states, position_ids=position_ids)[0]
+        for layer in self.llama_model.model.layers:
             layer_outputs = layer(hidden_states, position_ids=position_ids)
             hidden_states = layer_outputs[
                 0
             ]  # Only take the output, ignore attention weights
 
-        hidden_states = self.llama_model.norm(hidden_states)
+        hidden_states = self.llama_model.model.norm(hidden_states)
         if inference:
             predicted_sequence = self.ar_predictor(hidden_states, inference=True)
             return predicted_sequence,wav_input
         else:
             hidden_states = hidden_states.permute(1, 0, 2)
-            target_output_token_tensor = torch.from_numpy(output_prompt_token)
-            output_prompt_token_tensor = torch.from_numpy(
-                output_prompt_token[:, :7]
-            ).long()
+            target_output_token_tensor = output_prompt_token
+            output_prompt_token_tensor = output_prompt_token[:, :7]
+            
             output_prompt_token_embeddings = self.ar_predictor.embedding(
                 output_prompt_token_tensor
             )  # [sequence_length, 7, embedding_size]
@@ -180,6 +189,7 @@ class CyborgEncoder(nn.Module):
                 #create the audio file
                 predicted_tokens = predicted_tokens.T
                 inc = torch.arange(8) * 1024
+                inc = inc.to('cuda')
                 predicted_idx = (predicted_tokens + inc.reshape(-1, 1))
                 predicted_zq = audiodec.rx_encoder.lookup(predicted_idx)
 
@@ -215,7 +225,9 @@ class CyborgEncoder(nn.Module):
             z = audiodec.tx_encoder.encode(wav)
             idx = audiodec.tx_encoder.quantize(z)
         inc = torch.arange(8) * 1024
-        idx = (idx.cpu() - inc.reshape(-1, 1)).numpy().T
+        inc = inc.to('cuda')
+        idx = idx.to('cuda')
+        idx = (idx - inc.reshape(-1, 1)).T
         return idx,wav
 
     def calculate_tf_loss(self, context_vectors, semantic_features):
@@ -243,26 +255,21 @@ class CyborgEncoder(nn.Module):
         return tf_total_loss
 
 
-# Usage
-asr_processor = AutoProcessor.from_pretrained(
-    "facebook/wav2vec2-conformer-rope-large-960h-ft"
-)
-asr_model = Wav2Vec2ConformerModel.from_pretrained(
-    "facebook/wav2vec2-conformer-rope-large-960h-ft"
-)
+
 model_name = "libritts_v1"
-device = "cpu"
+device = "cuda"
 sample_rate, encoder_checkpoint, decoder_checkpoint = assign_model(model_name)
 audiodec = AudioDec(tx_device=device, rx_device=device)
 audiodec.load_transmitter(encoder_checkpoint)
 audiodec.load_receiver(encoder_checkpoint, decoder_checkpoint)
 
-cyborg_encoder = CyborgEncoder(asr_processor, asr_model, audiodec)
+cyborg_encoder = CyborgEncoder(audiodec)
+cyborg_encoder.to('cuda')
 # Setup the AdamW optimizer
 optimizer = optim.AdamW(cyborg_encoder.parameters(), lr=0.0001)
 scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.916)  # Exponential decay factor
 
-def train_model(model, wav_path, output_wav_path, device, optimizer,step, accumulation_steps=32):
+def train_model(model, wav_path, output_wav_path, device, optimizer,step, accumulation_steps=1):
     model.train()  # Set model to training mode
     total_loss = 0
 
@@ -296,15 +303,15 @@ output_wav_path = "vcc_output.wav"
 
 # Train the model for 1000 steps
 import os
-file_list = os.listdir("/Users/karthikganesan/Downloads/VCC2020-database-master/target_task1/TEF1")
-file_list = file_list[:5]
-num_steps = 5000
+file_list = os.listdir("/workspace/VCC2020-database/target_task1/TEF1")
+file_list = file_list[:1]
+num_steps = 50000
 epochs = 10
 step = 0
 while step<num_steps:
     for file_name in file_list:
-        input_wav_path = os.path.join("/Users/karthikganesan/Downloads/VCC2020-database-master/target_task1/TEF2",file_name)
-        output_wav_path = os.path.join("/Users/karthikganesan/Downloads/VCC2020-database-master/target_task1/TEF1",file_name)
+        input_wav_path = os.path.join("/workspace/VCC2020-database/target_task1/TEF2",file_name)
+        output_wav_path = os.path.join("/workspace/VCC2020-database/target_task1/TEF1",file_name)
 
         loss = train_model(cyborg_encoder, input_wav_path, output_wav_path, device, optimizer,step)
         print("file name",file_name)
