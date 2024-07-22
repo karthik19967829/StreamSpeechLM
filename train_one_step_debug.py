@@ -101,6 +101,8 @@ class CyborgEncoder(nn.Module):
             target_output_token_tensor = output_prompt_tokens
             output_prompt_token_tensor = output_prompt_tokens[:, :7]
             output_prompt_token_embeddings = self.ar_predictor.embedding(output_prompt_token_tensor)
+            print("output prompt token embeddings 104",output_prompt_token_embeddings.shape)
+            print("hidden states 105",hidden_states.shape)
             chunk_tensor = torch.cat((hidden_states, output_prompt_token_embeddings), dim=1)
             predicted_logits = self.ar_predictor(chunk_tensor, inference=False)
             predicted_tokens = torch.argmax(predicted_logits, dim=2)
