@@ -1,194 +1,124 @@
-# Import necessary libraries
 from transformers import AutoTokenizer, AutoModelForCausalLM, Trainer, TrainingArguments
 from datasets import Dataset
 import torch
 from utils.audiodec import AudioDec, assign_model
-import  os
-import torch
-import numpy as np
-from tqdm import tqdm
-import time
+import os
 import torchaudio
-import shutil
-import torch.nn.functional as F
-import torch.nn as nn
-
 
 # Load the tokenizer and model
-tokenizer = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0", torch_dtype=torch.bfloat16)
-model = AutoModelForCausalLM.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0", torch_dtype=torch.bfloat16)
+tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct", torch_dtype=torch.bfloat16)
+model = AutoModelForCausalLM.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct", torch_dtype=torch.bfloat16)
 
-num_speech_tokens = 1024  # Number of speech tokens
-num_special_tokens = 5    # BOS, EOS, SEP, PAD for user and assistant
-total_new_tokens = num_speech_tokens + num_special_tokens
-model.resize_token_embeddings(total_new_tokens)
-if model.model.embed_tokens.weight.dtype != torch.bfloat16:
-    model.model.embed_tokens.weight = model.model.embed_tokens.weight.to(torch.bfloat16)
-
-print(model.model.embed_tokens.weight.shape)
-# Update the model configuration to reflect the new vocabulary size
-#model.config.vocab_size = total_new_tokens
-sep_token_id = 1024
-prompt_bos = 1025
-prompt_eos = 1026
-assistant_bos = 1027
-assistant_eos = 1028
-# Define your input_ids and labels
-
-
-def tokenize_wav(wav_path,audiodec,device,sample_rate=24000):
+# Function to tokenize WAV file
+def tokenize_wav(wav_path, audiodec, device, sample_rate=24000):
     wav, sr = torchaudio.load(wav_path)
-    print("origial sampling rate",sr)
     if sr != sample_rate:
-        wav = torchaudio.functional.resample(wav, sr, sample_rate)    
+        wav = torchaudio.functional.resample(wav, sr, sample_rate)
     with torch.no_grad():
-        wav = wav.unsqueeze(1) #C T-> 1 C T  
+        wav = wav.unsqueeze(1)  # C T-> 1 C T
         wav = wav.float().to(device)
         z = audiodec.tx_encoder.encode(wav)
         idx = audiodec.tx_encoder.quantize(z)
-        
-        inc = torch.arange(8)*1024
-        idx = idx.cpu() - inc.reshape(-1,1)
+        inc = torch.arange(8) * 1024
+        idx = idx.cpu() - inc.reshape(-1, 1)
         return idx.numpy().T
 
 model_name = "libritts_v1"
-device = 'cpu' 
+device = 'cpu'
 sample_rate, encoder_checkpoint, decoder_checkpoint = assign_model(model_name)
-audiodec = AudioDec(tx_device=device , rx_device=device )
+audiodec = AudioDec(tx_device=device, rx_device=device)
 audiodec.load_transmitter(encoder_checkpoint)
 audiodec.load_receiver(encoder_checkpoint, decoder_checkpoint)
 
 file_list = os.listdir('/workspace/VCC2020-database/target_task1/TEF2')
-print(file_list)
 
-#def get_prompt(prompt_tensor):
-def flatten_output_tensor(tensor, sep_token_id=1024, assistant_bos=1027, assistant_eos=1028):
-    # Initialize the sequence with the assistant_bos token
-    sequence = [assistant_bos]
-    
-    # Loop through each row in the tensor
-    for row in tensor:
-        # Add the current row (8 tokens)
-        sequence.extend(row.tolist())
-        # Add the separator token
-        sequence.append(sep_token_id)
-    
-    # Replace the last sep_token_id with assistant_eos
-    sequence[-1] = assistant_eos
-    
-    # Convert the sequence list back to a tensor
-    return torch.tensor(sequence)
+def create_sliding_windows(tokens, window_size, step_size):
+    windows = []
+    for start in range(0, len(tokens) - window_size + 1, step_size):
+        end = start + window_size
+        window = tokens[start:end]
+        if len(window) == window_size:
+            windows.append(window)
+    return windows
 
-def flatten_tensor_with_tokens(tensor, sep_token_id=1024, prompt_bos=1025, prompt_eos=1026):
-    # Initialize the sequence with the prompt_bos token
-    sequence = [prompt_bos]
-    
-    # Loop through each row in the tensor
-    for row in tensor:
-        # Add the current row (8 tokens)
-        sequence.extend(row.tolist())
-        # Add the separator token
-        sequence.append(sep_token_id)
-    
-    # Replace the last sep_token_id with prompt_eos
-    sequence[-1] = prompt_eos
-    
-    # Convert the sequence list back to a tensor
-    return torch.tensor(sequence)
-
-def prepare_llm_data(input_tensor, output_tensor, ignore_index=-100,
-                     prompt_eos=1026, assistant_bos=1027):
-    # Flatten the input tensor with special tokens
-    flattened_input = flatten_tensor_with_tokens(input_tensor)
-    
-    # Flatten the output tensor with different special tokens
-    flattened_output = flatten_output_tensor(output_tensor)
-    
-    # Construct input_ids by concatenating input tensor with all but the last token of the output tensor
-    input_ids = torch.cat((flattened_input, flattened_output[:-1]))
-
-    # Create labels: ignore index for all of the input part, and then use the output tensor from the second token
-    labels = torch.cat((torch.full_like(flattened_input, ignore_index), flattened_output[1:]))
-
-    return input_ids, labels
-
-
-
+from tqdm import tqdm
+# Loop over each file in the file list
 input_ids_list = []
 labels_list = []
-
-# Loop over each file in the file list
-for file in file_list:
+target_spk_prompt_token = tokenize_wav('/workspace/VCC2020-database/target_task1/TEF1/E10051.wav', audiodec, device, sample_rate)
+for file in tqdm(file_list):
     source_file_wav_path = f'/workspace/VCC2020-database/target_task1/TEF2/{file}'
     target_file_wav_path = f'/workspace/VCC2020-database/target_task1/TEF1/{file}'
     
-    # Tokenize source and target audio files
-    source_prompt_token = tokenize_wav(source_file_wav_path, audiodec, device, sample_rate)[:141]
-    target_prompt_token = tokenize_wav(target_file_wav_path, audiodec, device, sample_rate)[:141]
+    source_prompt_token = tokenize_wav(source_file_wav_path, audiodec, device, sample_rate)
+    target_prompt_token = tokenize_wav(target_file_wav_path, audiodec, device, sample_rate)
     
-    # Prepare input IDs and labels
-    input_ids, labels = prepare_llm_data(source_prompt_token, target_prompt_token, ignore_index=-100, prompt_eos=1026, assistant_bos=1027)
     
-    # Append to lists
-    input_ids_list.append(input_ids.tolist())
-    labels_list.append(labels.tolist())
+    source_windows = create_sliding_windows(source_prompt_token, window_size=10, step_size=5)
+    target_windows = create_sliding_windows(target_prompt_token, window_size=10, step_size=5)
+    
+    for source_window, target_window in zip(source_windows, target_windows):
+        system_message = f"using the speech prompt (a sequence of speech frames, with each frame represented by 8 audio codes, which have values with a range [0-1023]), target speaker speech prompt: {target_spk_prompt_token.tolist()}, given a source speaker sequence of the same shape, generate corresponding target speaker speech of the same speech"
+        user_message = str(source_window.tolist())
+        assistant_message = str(target_window.tolist())
+        prompt_input_ids = tokenizer.apply_chat_template(conversation=[{"role":"system","content":system_message}, {"role":"user","content":user_message}],add_generation_prompt=True,tokenize=True,add_special_tokens=True)
+        input_ids = tokenizer.apply_chat_template(conversation=[{"role":"system","content":system_message}, {"role":"user","content":user_message},{"role":"assistant","content":assistant_message}],tokenize=True,add_special_tokens=True)
+        prompt_len = len(prompt_input_ids) 
+        output_ids = [-100]*(prompt_len-1) + input_ids[prompt_len:] #shift right by 1 
+        input_ids = input_ids[:-1] #remove the last EOS for the input
+        assert len(input_ids)==len(output_ids),"there is length mismatch"
+        input_ids_list.append(input_ids)
+        labels_list.append(output_ids)
 
-# Create the dataset
-data = {'input_ids': input_ids_list, 'labels': labels_list}
-dataset = Dataset.from_dict(data)
+max_input_len = max([len(input_ids) for input_ids in input_ids_list])
+
+for i in range(len(input_ids_list)):
+    input_ids_list[i] += [tokenizer.pad_token_id] * (max_input_len - len(input_ids_list[i]))
+    labels_list[i] += [-100] * (max_input_len - len(labels_list[i]))
+    assert input_ids_list[i]!=None,"input ids None"
+    assert labels_list[i]!=None,"label ids None"
+
+input_lens = set([len(input_ids) for input_ids in input_ids_list])
+output_lens = set([len(output_ids) for output_ids in labels_list])
+
+print("====input lens=====",input_lens,output_lens)
 
 
-'''input_ids = [
-    [0, 901, 250, 315, 30, 677, 900, 615, 643, 1, 901, 250, 189, 88, 677, 942, 833, 482, 1, 2],
-    [0, 901, 250, 60, 88, 677, 820, 280, 319, 1, 901, 250, 60, 88, 677, 820, 795, 319, 1, 2]
-]
-labels = [
-    [0, 901, 250, 315, 30, 677, 900, 615, 643, 1, 901, 250, 189, 88, 677, 942, 833, 482, 2, 2],
-    [0, 901, 250, 60, 88, 677, 820, 280, 319, 1, 901, 250, 60, 88, 677, 820, 795, 319, 2, 2]
-]
+train_data = {'input_ids': input_ids_list[:-1000], 'labels': labels_list[:-1000]}
+train_dataset = Dataset.from_dict(train_data)
 
-# Create a dataset
-data = {'input_ids': input_ids, 'labels': labels}
-dataset = Dataset.from_dict(data)'''
+eval_data = {'input_ids': input_ids_list[-1000:], 'labels': labels_list[-1000:]}
+eval_dataset = Dataset.from_dict(eval_data)
 
-# Define the training arguments
 training_args = TrainingArguments(
-    output_dir='./results',          # output directory
-    num_train_epochs=100,              # total number of training epochs
-    per_device_train_batch_size=32,   # batch size per device during training
-    logging_dir='./logs',            # directory for storing logs
+    output_dir='./results',
+    num_train_epochs=10,
+    per_device_train_batch_size=1,
+    logging_dir='./logs',
     logging_steps=10,
+    save_strategy="steps",
+    weight_decay=0.01,
+    learning_rate=2e-5,
+    gradient_accumulation_steps=64,
+    save_steps=-1,
+    evaluation_strategy="steps",
+    eval_steps=1,
+    load_best_model_at_end=True
 )
 
-# Define a data collator
 def data_collator(features):
     input_ids = torch.tensor([feature['input_ids'] for feature in features], dtype=torch.long)
     labels = torch.tensor([feature['labels'] for feature in features], dtype=torch.long)
-    
-    # Set the labels of the prompt tokens to -100
-    for label in labels:
-        prompt_end = (label == 1).nonzero(as_tuple=True)[0][-1].item() + 1
-        label[:prompt_end] = -100
-    
-    batch = {
-        'input_ids': input_ids,
-        'labels': labels
-    }
+    batch = {'input_ids': input_ids, 'labels': labels}
     return batch
 
-# Initialize the Trainer
 trainer = Trainer(
-    model=model,                         # the instantiated 🤗 Transformers model to be trained
-    args=training_args,                  # training arguments, defined above
-    train_dataset=dataset,               # training dataset
-    data_collator=data_collator ,
-    ogging_steps=10,
-    save_strategy="steps",
-    save_steps=500,
-    evaluation_strategy="steps",  # Evaluate every so many steps
-    eval_steps=500,               # Steps at which evaluation occurs
-    load_best_model_at_end=True         # data collator for dynamic padding
+    model=model,
+    args=training_args,
+    train_dataset=train_dataset,
+    eval_dataset=eval_dataset,
+    data_collator=data_collator
 )
 
-# Train the model
 trainer.train()
+
