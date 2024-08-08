@@ -1,18 +1,21 @@
 from transformers import AutoTokenizer, AutoModelForCausalLM, Trainer, TrainingArguments
-from datasets import Dataset
+from datasets import Dataset,load_dataset
 import torch
 from utils.audiodec import AudioDec, assign_model
 import os
 import torchaudio
 import logging
 import sys
+import soundfile as sf
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 # Load the tokenizer and model
-tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct", torch_dtype=torch.bfloat16)
+tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct", torch_dtype="auto")
 
-model = AutoModelForCausalLM.from_pretrained("/workspace/CyborgVoice/results/checkpoint-20", torch_dtype=torch.bfloat16)
+model = AutoModelForCausalLM.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct", torch_dtype="auto")
+
+ds = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean")
 
 if '<sosp>' not in tokenizer.get_vocab():
     units_size=1024
@@ -26,9 +29,9 @@ if len(tokenizer) > embedding_size:
 
 
 logger.info("only update embedding parameters")
-'''for name, param in model.named_parameters():
+for name, param in model.named_parameters():
     if "embed" not in name:
-        param.requires_grad = False'''
+        param.requires_grad = False
 
 
 # Function to tokenize WAV file
@@ -62,58 +65,52 @@ audiodec = AudioDec(tx_device=device, rx_device=device)
 audiodec.load_transmitter(encoder_checkpoint)
 audiodec.load_receiver(encoder_checkpoint, decoder_checkpoint)
 
-file_list = os.listdir('/workspace/VCC2020-database/target_task1/TEF2')
-
-def create_sliding_windows(tokens, window_size, step_size):
-    windows = []
-    for start in range(0, len(tokens) - window_size + 1, step_size):
-        end = start + window_size
-        window = tokens[start:end]
-        if len(window) == window_size:
-            windows.append("".join(window))
-    return windows
-
 from tqdm import tqdm
 # Loop over each file in the file list
 input_ids_list = []
 labels_list = []
-target_spk_prompt_token = tokenize_wav('/workspace/VCC2020-database/target_task1/TEF1/E10051.wav', audiodec, device, sample_rate)
-for file in tqdm(file_list):
-    source_file_wav_path = f'/workspace/VCC2020-database/target_task1/TEF2/{file}'
-    target_file_wav_path = f'/workspace/VCC2020-database/target_task1/TEF1/{file}'
-    
-    source_prompt_token = tokenize_wav(source_file_wav_path, audiodec, device, sample_rate)
-    target_prompt_token = tokenize_wav(target_file_wav_path, audiodec, device, sample_rate)
-    
-    
-    source_windows = create_sliding_windows(source_prompt_token, window_size=10, step_size=5)
-    target_windows = create_sliding_windows(target_prompt_token, window_size=10, step_size=5)
-    
-    for source_window, target_window in zip(source_windows, target_windows):
-        print(source_window, target_window)
-        system_message = f"using the speech prompt a sequence of speech frames, with each frame represented by 8 audio codes, which have values with a range [0-1023]) given a source speaker sequence of the same shape, generate corresponding target speaker speech of the same speech"
-        user_message = source_window
-        assistant_message = target_window
-        prompt_input_ids = tokenizer.apply_chat_template(conversation=[{"role":"system","content":system_message}, {"role":"user","content":user_message}],add_generation_prompt=True,tokenize=True,add_special_tokens=True)
-        input_ids = tokenizer.apply_chat_template(conversation=[{"role":"system","content":system_message}, {"role":"user","content":user_message},{"role":"assistant","content":assistant_message}],tokenize=True,add_special_tokens=True)
-        prompt_len = len(prompt_input_ids) 
-        output_ids = [-100]*(prompt_len-1) + input_ids[prompt_len:] #shift right by 1 
-        input_ids = input_ids[:-1] #remove the last EOS for the input
-        assert len(input_ids)==len(output_ids),"there is length mismatch"
-        input_ids_list.append(input_ids)
-        labels_list.append(output_ids)
+system_message = "convert the given sequence of speech tokens to text ,strictly directly generated the text contained and nothing else"
+
+for example in ds['validation']:
+    audio_array = example['audio']['array']
+    audio_path = 'audio_example.wav'
+    sf.write(audio_path, audio_array,16000)  # Save the audio file
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    special_audio_tokens_list  = tokenize_wav(audio_path, audiodec, device, sample_rate=24000)
+    user_message = "".join(special_audio_tokens_list)
+    assistant_message = example['text'].lower()
+    print(user_message)
+    print(assistant_message)
+    prompt_input_ids = tokenizer.apply_chat_template(conversation=[{"role":"system","content":system_message}, {"role":"user","content":user_message}],add_generation_prompt=True,tokenize=True,add_special_tokens=True)
+    input_ids = tokenizer.apply_chat_template(conversation=[{"role":"system","content":system_message}, {"role":"user","content":user_message},{"role":"assistant","content":assistant_message}],tokenize=True,add_special_tokens=True)
+    prompt_len = len(prompt_input_ids) 
+    output_ids = [-100]*(prompt_len-1) + input_ids[prompt_len:] #shift right by 1 
+    input_ids = input_ids[:-1] #remove the last EOS for the input
+    assert len(input_ids)==len(output_ids),"there is length mismatch"
+    input_ids_list.append(input_ids)
+    labels_list.append(output_ids)
 
 input_lens = set([len(input_ids) for input_ids in input_ids_list])
 output_lens = set([len(output_ids) for output_ids in labels_list])
+
+max_input_len = max([len(input_ids) for input_ids in input_ids_list])
+
+tokenizer.pad_token_id = tokenizer.eos_token_id
+
+for i in range(len(input_ids_list)):
+    input_ids_list[i] += [tokenizer.pad_token_id] * (max_input_len - len(input_ids_list[i]))
+    labels_list[i] += [-100] * (max_input_len - len(labels_list[i]))
+    assert input_ids_list[i]!=None,"input ids None"
+    assert labels_list[i]!=None,"label ids None"
 
 print("====input lens=====",input_lens,output_lens)
 print("num data samples==== ",len(input_ids_list))
 
 
-train_data = {'input_ids': input_ids_list[:-1000], 'labels': labels_list[:-1000]}
+train_data = {'input_ids': input_ids_list[:-10], 'labels': labels_list[:-10]}
 train_dataset = Dataset.from_dict(train_data)
 
-eval_data = {'input_ids': input_ids_list[-1000:], 'labels': labels_list[-1000:]}
+eval_data = {'input_ids': input_ids_list[-10:], 'labels': labels_list[-10:]}
 eval_dataset = Dataset.from_dict(eval_data)
 
 training_args = TrainingArguments(
@@ -130,7 +127,8 @@ training_args = TrainingArguments(
     save_steps=128,
     evaluation_strategy="steps",
     eval_steps=64,
-    load_best_model_at_end=True
+    load_best_model_at_end=True,
+    deepspeed="./ds_config_zero3.json"
 )
 
 def data_collator(features):
