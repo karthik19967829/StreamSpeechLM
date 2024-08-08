@@ -11,6 +11,24 @@ import soundfile as sf
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 # Load the tokenizer and model
+training_args = TrainingArguments(
+    output_dir='./results',
+    num_train_epochs=20,
+    per_device_train_batch_size=1,
+    per_device_eval_batch_size=1,
+    logging_dir='./logs',
+    logging_steps=10,
+    save_strategy="steps",
+    weight_decay=0.01,
+    learning_rate=2e-5,
+    gradient_accumulation_steps=128,
+    save_steps=128,
+    evaluation_strategy="steps",
+    eval_steps=64,
+    load_best_model_at_end=True,
+    deepspeed="zero3.json"
+)
+
 tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct", torch_dtype="auto")
 
 model = AutoModelForCausalLM.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct", torch_dtype="auto")
@@ -113,23 +131,7 @@ train_dataset = Dataset.from_dict(train_data)
 eval_data = {'input_ids': input_ids_list[-10:], 'labels': labels_list[-10:]}
 eval_dataset = Dataset.from_dict(eval_data)
 
-training_args = TrainingArguments(
-    output_dir='./results',
-    num_train_epochs=20,
-    per_device_train_batch_size=1,
-    per_device_eval_batch_size=1,
-    logging_dir='./logs',
-    logging_steps=10,
-    save_strategy="steps",
-    weight_decay=0.01,
-    learning_rate=2e-5,
-    gradient_accumulation_steps=128,
-    save_steps=128,
-    evaluation_strategy="steps",
-    eval_steps=64,
-    load_best_model_at_end=True,
-    deepspeed="./ds_config_zero3.json"
-)
+
 
 def data_collator(features):
     #print(f"input_ids: {[feature['input_ids'] for feature in features]}")
