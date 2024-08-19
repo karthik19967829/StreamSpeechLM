@@ -26,12 +26,16 @@ training_args = TrainingArguments(
     evaluation_strategy="steps",
     eval_steps=64,
     load_best_model_at_end=True,
-    deepspeed="zero3.json"
 )
 
-tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct", torch_dtype="auto")
+tokenizer = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0", torch_dtype="auto")
 
-model = AutoModelForCausalLM.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct", torch_dtype="auto")
+model = AutoModelForCausalLM.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0", torch_dtype="auto")
+
+device = 'cuda'
+model.to(device)
+
+print(model)
 
 ds = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean")
 
@@ -42,6 +46,12 @@ if '<sosp>' not in tokenizer.get_vocab():
     tokenizer.add_tokens(new_tokens)
 
 embedding_size = model.get_input_embeddings().weight.shape[0]
+
+
+print("model get input embedding",model.get_input_embeddings().weight.shape)
+print("len tokenizer",len(tokenizer))
+print("len embedding size",embedding_size)
+
 if len(tokenizer) > embedding_size:
     model.resize_token_embeddings(len(tokenizer))
 
@@ -77,7 +87,6 @@ def tokenize_wav(wav_path, audiodec, device, sample_rate=24000):
         return special_audio_tokens_list  
 
 model_name = "libritts_v1"
-device = 'cuda'
 sample_rate, encoder_checkpoint, decoder_checkpoint = assign_model(model_name)
 audiodec = AudioDec(tx_device=device, rx_device=device)
 audiodec.load_transmitter(encoder_checkpoint)
@@ -97,13 +106,14 @@ for example in ds['validation']:
     special_audio_tokens_list  = tokenize_wav(audio_path, audiodec, device, sample_rate=24000)
     user_message = "".join(special_audio_tokens_list)
     assistant_message = example['text'].lower()
-    print(user_message)
-    print(assistant_message)
+    #print(user_message)
+    #print(assistant_message)
     prompt_input_ids = tokenizer.apply_chat_template(conversation=[{"role":"system","content":system_message}, {"role":"user","content":user_message}],add_generation_prompt=True,tokenize=True,add_special_tokens=True)
     input_ids = tokenizer.apply_chat_template(conversation=[{"role":"system","content":system_message}, {"role":"user","content":user_message},{"role":"assistant","content":assistant_message}],tokenize=True,add_special_tokens=True)
     prompt_len = len(prompt_input_ids) 
     output_ids = [-100]*(prompt_len-1) + input_ids[prompt_len:] #shift right by 1 
     input_ids = input_ids[:-1] #remove the last EOS for the input
+    print("len input IDs",len(input_ids))
     assert len(input_ids)==len(output_ids),"there is length mismatch"
     input_ids_list.append(input_ids)
     labels_list.append(output_ids)
@@ -111,13 +121,19 @@ for example in ds['validation']:
 input_lens = set([len(input_ids) for input_ids in input_ids_list])
 output_lens = set([len(output_ids) for output_ids in labels_list])
 
-max_input_len = max([len(input_ids) for input_ids in input_ids_list])
+max_input_len = 2000
+
+#max([len(input_ids) for input_ids in input_ids_list])
 
 tokenizer.pad_token_id = tokenizer.eos_token_id
 
 for i in range(len(input_ids_list)):
-    input_ids_list[i] += [tokenizer.pad_token_id] * (max_input_len - len(input_ids_list[i]))
-    labels_list[i] += [-100] * (max_input_len - len(labels_list[i]))
+    if max_input_len<len(input_ids_list[i]):
+        input_ids_list[i] =  input_ids_list[i][:max_input_len]
+        labels_list[i] = labels_list[i][:max_input_len] 
+    else:
+        input_ids_list[i] += [tokenizer.pad_token_id] * (max_input_len - len(input_ids_list[i]))    
+        labels_list[i] += [-100] * (max_input_len - len(labels_list[i]))
     assert input_ids_list[i]!=None,"input ids None"
     assert labels_list[i]!=None,"label ids None"
 
@@ -137,6 +153,7 @@ def data_collator(features):
     #print(f"input_ids: {[feature['input_ids'] for feature in features]}")
     input_ids = torch.tensor([feature['input_ids'] for feature in features], dtype=torch.long)
     labels = torch.tensor([feature['labels'] for feature in features], dtype=torch.long)
+    print("input IDs=====",input_ids.shape,"label IDs=====",labels.shape)
     batch = {'input_ids': input_ids, 'labels': labels}
     return batch
 
