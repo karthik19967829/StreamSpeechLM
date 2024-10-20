@@ -29,12 +29,12 @@ def get_client(key=None):
     return client
 
 
-def generate_response(client: OpenAI, prompt, model="gpt-4"):
+def generate_response(client: OpenAI, prompt, model="gpt-4", system_prompt: str ="You are a helpful assistant."):
     try:
         response = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
             ],
             max_tokens=2048,  # You can adjust this value as needed
