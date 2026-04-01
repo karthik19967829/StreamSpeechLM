@@ -1,4 +1,5 @@
-# CyborgVoice
+# StreamSpeechLM
+
 This the streamingVoice conversion component 
 
 ASR component: Fast U2++ (CTC + Transformer) for semantic representation extraction, alternative: https://github.com/ufal/whisper_streaming 
